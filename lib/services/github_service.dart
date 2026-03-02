@@ -4,29 +4,40 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/task_model.dart';
 
 class GithubService {
-  // ⚡ 动态获取用户凭证与仓库信息
+  // ⚡ 动态获取用户凭证与仓库信息 (加入终极净化器)
   static Future<Map<String, String>?> _getCredentials() async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('github_token');
-    final repoUrl = prefs.getString('github_repo_url');
+    // 🛡️ 防御：去除复制粘贴带来的首尾隐形空格
+    final token = prefs.getString('github_token')?.trim();
+    String? repoUrl = prefs.getString('github_repo_url')?.trim();
 
     if (token == null || token.isEmpty || repoUrl == null || repoUrl.isEmpty) {
+      print("⚠️ 凭证缺失: Token 或 URL 为空");
       return null;
     }
 
-    // ⚡ 强悍的正则：无论是 https://github.com/A/B 还是 git@github.com:A/B.git，都能精准提取
+    // 🛡️ 防御：去掉 URL 末尾可能手滑多加的斜杠 (例如 tide/ -> tide)
+    if (repoUrl.endsWith('/')) {
+      repoUrl = repoUrl.substring(0, repoUrl.length - 1);
+    }
+
     try {
       final uri = Uri.parse(repoUrl.replaceAll('.git', ''));
       final pathSegments = uri.pathSegments;
-      if (pathSegments.length >= 2) {
+      // 🛡️ 防御：过滤掉所有空层级，防止解析错位
+      final validSegments = pathSegments.where((s) => s.isNotEmpty).toList();
+
+      if (validSegments.length >= 2) {
         return {
           'token': token,
-          'owner': pathSegments[pathSegments.length - 2],
-          'repo': pathSegments[pathSegments.length - 1],
+          'owner': validSegments[validSegments.length - 2],
+          'repo': validSegments[validSegments.length - 1],
         };
+      } else {
+        print("❌ URL 解析异常：未能提取到 owner 和 repo");
       }
     } catch (e) {
-      print("URL 解析失败: $e");
+      print("❌ URL 解析致命错误: $e");
     }
     return null;
   }
@@ -42,10 +53,12 @@ class GithubService {
   // ==========================================
   static Future<List<TaskModel>?> fetchTasksFromCloud() async {
     final creds = await _getCredentials();
-    if (creds == null) return null; // 凭证缺失
+    if (creds == null) return null;
 
     final baseUrl =
         'https://api.github.com/repos/${creds['owner']}/${creds['repo']}/contents/tasks.json';
+
+    print("📡 正在尝试连接云端: $baseUrl");
 
     try {
       final response = await http.get(
@@ -54,6 +67,7 @@ class GithubService {
       );
 
       if (response.statusCode == 200) {
+        print("✅ 云端数据拉取成功 (200)");
         final data = jsonDecode(response.body);
         final String contentStr = utf8.decode(
           base64Decode(data['content'].replaceAll('\n', '')),
@@ -61,11 +75,17 @@ class GithubService {
         final List<dynamic> jsonList = jsonDecode(contentStr);
         return jsonList.map((e) => TaskModel.fromJson(e)).toList();
       } else if (response.statusCode == 404) {
-        // ⚡ 完美符合你的要求：如果根目录没有 task.json，返回空列表，表示云端是空的
+        print("⚠️ 云端文件不存在 (404) - 视为空仓库");
         return [];
+      } else {
+        // 🚨 抓捕内鬼：打印真实的服务器拒绝理由！
+        print("❌ 云端拉取失败！状态码: ${response.statusCode}");
+        print("❌ GitHub 返回信息: ${response.body}");
+        return null;
       }
-      return null;
     } catch (e) {
+      // 🚨 抓捕网络异常 (如没走代理导致的超时)
+      print("❌ 发生底层网络异常 (可能是没走代理或断网): $e");
       return null;
     }
   }
@@ -83,7 +103,6 @@ class GithubService {
 
     try {
       String? sha;
-      // 侦察：看看云端有没有旧文件
       final getResp = await http.get(Uri.parse(baseUrl), headers: headers);
       if (getResp.statusCode == 200) {
         sha = jsonDecode(getResp.body)['sha'];
@@ -98,7 +117,7 @@ class GithubService {
         "message": "Auto Sync: ${DateTime.now().toIso8601String()}",
         "content": base64Content,
       };
-      if (sha != null) body["sha"] = sha; // ⚡ 有 sha 则覆盖，无 sha 则在根目录自动新建！
+      if (sha != null) body["sha"] = sha;
 
       final putResp = await http.put(
         Uri.parse(baseUrl),
@@ -106,8 +125,16 @@ class GithubService {
         body: jsonEncode(body),
       );
 
-      return putResp.statusCode == 200 || putResp.statusCode == 201;
+      if (putResp.statusCode == 200 || putResp.statusCode == 201) {
+        print("✅ 数据成功推送至云端！");
+        return true;
+      } else {
+        print("❌ 云端推送失败！状态码: ${putResp.statusCode}");
+        print("❌ GitHub 返回信息: ${putResp.body}");
+        return false;
+      }
     } catch (e) {
+      print("❌ 推送发生底层网络异常: $e");
       return false;
     }
   }
